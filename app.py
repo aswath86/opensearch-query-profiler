@@ -330,59 +330,459 @@ if hasattr(st.session_state, 'result'):
         fig.update_layout(title="Top 10 Slowest Components", xaxis_title="Time (ms)", height=400)
         st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': True})
     
-    # All shards details
-    if shards:
-        st.subheader("Shard Details")
-        for shard in shards:
-            shard_name = f"{shard['index']}[{shard['id']}]"
-            with st.expander(f"📊 {shard_name}", expanded=False):
+
+
+
+def build_operation_tree(query_data, parent_time=None):
+    """Build hierarchical operation tree"""
+    operations = []
+    
+    if isinstance(query_data, list):
+        for item in query_data:
+            operations.extend(build_operation_tree(item, parent_time))
+    elif isinstance(query_data, dict):
+        time_ns = query_data.get('time_in_nanos', 0)
+        time_ms = time_ns / 1_000_000
+        
+        operation = {
+            'type': query_data.get('type', 'Unknown'),
+            'description': query_data.get('description', ''),
+            'time_ms': time_ms,
+            'time_ns': time_ns,
+            'breakdown': query_data.get('breakdown', {}),
+            'children': []
+        }
+        
+        # Calculate percentage of parent time
+        if parent_time and parent_time > 0:
+            operation['percentage'] = (time_ms / parent_time) * 100
+        else:
+            operation['percentage'] = 100
+            
+        # Process children recursively
+        if 'children' in query_data and query_data['children']:
+            operation['children'] = build_operation_tree(query_data['children'], time_ms)
+        
+        operations.append(operation)
+    
+    return operations
+
+def calculate_self_time(operation):
+    """Calculate self time (total time - children time)"""
+    children_time = sum(child['time_ms'] for child in operation.get('children', []))
+    return operation['time_ms'] - children_time
+
+def get_color_for_percentage(percentage):
+    """Get color based on time percentage"""
+    if percentage >= 80:
+        return "#ff6b6b"  # Red
+    elif percentage >= 60:
+        return "#ffa726"  # Orange  
+    elif percentage >= 40:
+        return "#ffeb3b"  # Yellow
+    elif percentage >= 20:
+        return "#66bb6a"  # Light Green
+    else:
+        return "#e0e0e0"  # Gray
+
+def create_breakdown_chart_from_list(breakdown_list, title):
+    """Create breakdown chart from list format"""
+    if not breakdown_list or len(breakdown_list) <= 1:
+        return None
+    
+    # Filter out zero time operations and sort by time
+    filtered_breakdown = [item for item in breakdown_list if item.get('time_ms', 0) > 0]
+    filtered_breakdown.sort(key=lambda x: x.get('time_ms', 0), reverse=True)
+    
+    if len(filtered_breakdown) <= 1:
+        return None
+    
+    ops = [item.get('operation', '').replace('_', ' ').title() for item in filtered_breakdown[:8]]
+    times = [item.get('time_ms', 0) for item in filtered_breakdown[:8]]
+    
+    fig = go.Figure(go.Bar(
+        y=ops[::-1], 
+        x=times[::-1], 
+        orientation='h',
+        marker_color=times[::-1], 
+        marker_colorscale='Viridis'
+    ))
+    fig.update_layout(
+        title=title, 
+        xaxis_title="Time (ms)", 
+        height=max(200, len(ops) * 30),
+        showlegend=False
+    )
+    return fig
+
+def create_breakdown_chart_from_dict(breakdown_dict, title):
+    """Create breakdown chart from dict format"""
+    if not breakdown_dict:
+        return None
+    
+    breakdown_data = []
+    for key, value in breakdown_dict.items():
+        if not key.endswith('_count') and isinstance(value, (int, float)) and value > 0:
+            time_ms = value / 1_000_000 if value > 1000 else value
+            breakdown_data.append({
+                'operation': key,
+                'time_ms': time_ms
+            })
+    
+    return create_breakdown_chart_from_list(breakdown_data, title)
+
+def create_collector_chart(collector_data, title):
+    """Create chart for collector data"""
+    if not collector_data or len(collector_data) <= 1:
+        return None
+    
+    # Sort by time
+    sorted_collectors = sorted(collector_data, key=lambda x: x.get('time_ms', 0), reverse=True)
+    
+    names = [item['name'] for item in sorted_collectors[:10]]
+    times = [item['time_ms'] for item in sorted_collectors[:10]]
+    
+    fig = go.Figure(go.Bar(
+        y=names[::-1], 
+        x=times[::-1], 
+        orientation='h',
+        marker_color=times[::-1], 
+        marker_colorscale='Oranges'
+    ))
+    fig.update_layout(
+        title=title, 
+        xaxis_title="Time (ms)", 
+        height=max(200, len(names) * 30),
+        showlegend=False
+    )
+    return fig
+
+def display_operation_tree(operations, level=0, total_time=None, unique_prefix=""):
+    """Display operations in a tree structure"""
+    for i, op in enumerate(operations):
+        # Calculate percentage relative to total query time
+        if total_time and total_time > 0:
+            total_percentage = (op['time_ms'] / total_time) * 100
+        else:
+            total_percentage = op['percentage']
+            
+        self_time = calculate_self_time(op)
+        color = get_color_for_percentage(total_percentage)
+        
+        # Create indentation for tree structure
+        indent_spaces = "　" * level
+        tree_symbol = "├─ " if level > 0 else "🔍 "
+        
+        # Operation header container
+        with st.container():
+            # Operation header with timing info
+            col1, col2, col3, col4 = st.columns([3, 1, 1, 1])
+            
+            with col1:
+                # Operation name with tree structure
+                st.markdown(f"**{indent_spaces}{tree_symbol}{op['type']}**")
+                if op['description'] and level < 3:  # Only show description for top levels
+                    with st.container():
+                        st.code(op['description'], language='text')
+            
+            with col2:
+                st.metric("Self Time", f"{self_time:.2f}ms")
+            
+            with col3:
+                st.metric("Total Time", f"{op['time_ms']:.2f}ms")
                 
-                # Queries
-                for search in shard['searches']:
-                    if search['queries']:
-                        st.write("**🔍 Queries:**")
-                        for query in search['queries']:
-                            st.write(f"• {query['type']}: {query['time_ms']:.2f}ms")
-                            if query['description']:
-                                st.code(query['description'])
-                            if query['breakdown']:
-                                breakdown_fig = create_breakdown_chart(
-                                    sorted(query['breakdown'], key=lambda x: x['time_ms'], reverse=True),
-                                    f"Query: {query['type']}"
-                                )
-                                if breakdown_fig:
-                                    st.plotly_chart(breakdown_fig, use_container_width=True, config={'displayModeBar': True})
+            with col4:
+                # Color-coded percentage badge
+                st.markdown(f"""
+                <div style="
+                    background-color: {color}; 
+                    color: white; 
+                    padding: 4px 8px; 
+                    border-radius: 4px; 
+                    text-align: center; 
+                    font-weight: bold;
+                    font-size: 12px;
+                ">
+                    {total_percentage:.1f}%
+                </div>
+                """, unsafe_allow_html=True)
+            
+            # Show breakdown if available and at top levels
+            if op['breakdown'] and isinstance(op['breakdown'], dict) and level < 2:
+                breakdown_data = []
+                total_breakdown_time = sum(v for k, v in op['breakdown'].items() if not k.endswith('_count') and isinstance(v, (int, float)))
+                
+                for key, value in op['breakdown'].items():
+                    if not key.endswith('_count') and isinstance(value, (int, float)) and value > 0:
+                        time_ms = value / 1_000_000
+                        relative_pct = (value / total_breakdown_time * 100) if total_breakdown_time > 0 else 0
+                        breakdown_data.append({
+                            'Operation': key.replace('_', ' ').title(),
+                            'Time (ms)': f"{time_ms:.3f}",
+                            'Relative %': f"{relative_pct:.1f}%"
+                        })
+                
+                if breakdown_data and len(breakdown_data) > 1:
+                    breakdown_data.sort(key=lambda x: float(x['Time (ms)']), reverse=True)
                     
-                    # Collectors
-                    if search['collectors']:
-                        st.write("**🗂️ Collectors:**")
-                        for collector in search['collectors']:
-                            st.write(f"• {collector['name']}: {collector['time_ms']:.2f}ms")
-                            if collector['reason']:
-                                st.write(f"  Reason: {collector['reason']}")
-                            
-                            # Show child collectors chart
-                            if collector.get('children'):
-                                child_names = [child['name'] for child in collector['children']]
-                                child_times = [child['time_ms'] for child in collector['children']]
-                                
-                                if child_names:
-                                    fig = go.Figure(go.Bar(y=child_names, x=child_times, orientation='h', 
-                                                          marker_color=child_times, marker_colorscale='Oranges'))
-                                    fig.update_layout(title=f"Collector: {collector['name']}", xaxis_title="Time (ms)", height=200)
-                                    st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': True})
+                    # Create breakdown chart
+                    ops = [item['Operation'] for item in breakdown_data[:8]]
+                    times = [float(item['Time (ms)']) for item in breakdown_data[:8]]
+                    
+                    if len(times) > 1:
+                        fig = go.Figure(go.Bar(
+                            y=ops[::-1], 
+                            x=times[::-1], 
+                            orientation='h',
+                            marker_color=times[::-1], 
+                            marker_colorscale='Viridis'
+                        ))
+                        fig.update_layout(
+                            title=f"Query Breakdown: {op['type']}", 
+                            xaxis_title="Time (ms)", 
+                            height=max(200, len(ops) * 30),
+                            showlegend=False
+                        )
+                        st.plotly_chart(fig, use_container_width=True)
+                    
+                    # Show breakdown table with button toggle (with unique prefix)
+                    button_key = f"query_breakdown_{unique_prefix}_{level}_{i}"
+                    if button_key not in st.session_state:
+                        st.session_state[button_key] = False
+                    
+                    col_btn, col_info = st.columns([3, 1])
+                    with col_btn:
+                        if st.button(f"📋 {'Hide' if st.session_state[button_key] else 'Show'} Query Breakdown Table ({len(breakdown_data)} operations)", key=button_key + "_btn"):
+                            st.session_state[button_key] = not st.session_state[button_key]
+                    
+                    if st.session_state[button_key]:
+                        st.dataframe(breakdown_data, use_container_width=True, hide_index=True)
+            
+            # Add visual separator for tree levels
+            if level < 3:
+                st.markdown("---")
+        
+        # Recursively display children (limit depth to avoid too much nesting)
+        if op['children'] and level < 3:
+            display_operation_tree(op['children'], level + 1, total_time, unique_prefix)
+
+# Query Profile Tree Section 
+if hasattr(st.session_state, 'result') and shards:
+    st.subheader("🌳 Query Profile Tree")
+    st.write("*Hierarchical view of query execution*")
+    
+    # Group shards by index
+    index_groups = {}
+    for shard in shards:
+        index_name = shard['index']
+        if index_name not in index_groups:
+            index_groups[index_name] = []
+        index_groups[index_name].append(shard)
+    
+    # Display each index
+    for index_idx, (index_name, index_shards) in enumerate(index_groups.items()):
+        st.write(f"### 📂 Index: **{index_name}**")
+        
+        # Calculate total index time
+        total_index_time = sum(
+            sum(q['time_ms'] for search in shard['searches'] for q in search['queries'])
+            for shard in index_shards
+        )
+        
+        if total_index_time > 0:
+            st.write(f"**Cumulative time:** {total_index_time:.2f}ms")
+        
+        # Display each shard in the index (make each shard collapsible and collapsed by default)
+        for shard_idx, shard in enumerate(sorted(index_shards, key=lambda s: sum(q['time_ms'] for search in s['searches'] for q in search['queries']), reverse=True)):
+            shard_time = sum(q['time_ms'] for search in shard['searches'] for q in search['queries'])
+            shard_percentage = (shard_time / total_index_time * 100) if total_index_time > 0 else 0
+            shard_color = get_color_for_percentage(shard_percentage)
+            
+            # Make each shard collapsible (collapsed by default)
+            with st.expander(
+                f"🔍 Shard [{shard['id']}] - {shard_time:.2f}ms ({shard_percentage:.1f}%)", 
+                expanded=False
+            ):
+                # Shard time badge
+                st.markdown(f"""
+                <div style="
+                    background-color: {shard_color}; 
+                    color: white; 
+                    padding: 8px 16px; 
+                    border-radius: 8px; 
+                    text-align: center; 
+                    font-weight: bold;
+                    margin-bottom: 16px;
+                ">
+                    Shard Time: {shard_time:.2f}ms ({shard_percentage:.1f}%)
+                </div>
+                """, unsafe_allow_html=True)
                 
-                # Aggregations
+                # Process searches for this shard
+                for search_idx, search in enumerate(shard['searches']):
+                    if search['queries']:
+                        # Build operation tree from raw search data
+                        if hasattr(st.session_state, 'result'):
+                            original_shards = st.session_state.result.get('profile', {}).get('shards', [])
+                            
+                            # Find the matching original shard data
+                            original_shard = None
+                            for orig_shard in original_shards:
+                                if shard['id'] in orig_shard.get('id', ''):
+                                    original_shard = orig_shard
+                                    break
+                            
+                            if original_shard and 'searches' in original_shard:
+                                for orig_search_idx, orig_search in enumerate(original_shard['searches']):
+                                    if orig_search_idx == search_idx and 'query' in orig_search:
+                                        # Calculate total search time for percentage calculations
+                                        total_search_time = sum(q['time_ms'] for q in search['queries'])
+                                        
+                                        # Build and display operation tree with unique prefix
+                                        operations = build_operation_tree(orig_search['query'])
+                                        
+                                        if operations:
+                                            st.write("**Query Operations:**")
+                                            # Create unique prefix for this shard/search combination
+                                            unique_prefix = f"{index_idx}_{shard_idx}_{search_idx}_{orig_search_idx}"
+                                            display_operation_tree(operations, total_time=total_search_time, unique_prefix=unique_prefix)
+                                        
+                                        # Show rewrite time if available
+                                        if 'rewrite_time' in orig_search and orig_search['rewrite_time'] > 0:
+                                            rewrite_ms = orig_search['rewrite_time'] / 1_000_000
+                                            st.info(f"🔄 **Rewrite Time:** {rewrite_ms:.3f}ms")
+                
+                # Show collectors information (with charts and button-toggle tables)
+                if any(search.get('collectors') for search in shard['searches']):
+                    st.write("**Collectors:**")
+                    all_collectors = []
+                    for search in shard['searches']:
+                        for collector in search.get('collectors', []):
+                            all_collectors.append({
+                                'name': collector['name'],
+                                'time_ms': collector['time_ms'],
+                                'reason': collector.get('reason', ''),
+                                'children': collector.get('children', [])
+                            })
+                            # Add children as separate entries
+                            for child in collector.get('children', []):
+                                all_collectors.append({
+                                    'name': f"  └─ {child['name']}",
+                                    'time_ms': child['time_ms'],
+                                    'reason': child.get('reason', ''),
+                                    'children': []
+                                })
+                    
+                    # Create collector chart
+                    if len(all_collectors) > 1:
+                        collector_fig = create_collector_chart(all_collectors, "Collector Performance")
+                        if collector_fig:
+                            st.plotly_chart(collector_fig, use_container_width=True)
+                    
+                    # Show collector details in containers
+                    for collector_idx, search in enumerate(shard['searches']):
+                        for coll_idx, collector in enumerate(search.get('collectors', [])):
+                            with st.container():
+                                st.write(f"📋 **{collector['name']}** ({collector['time_ms']:.2f}ms)")
+                                if collector.get('reason'):
+                                    st.write(f"   Reason: {collector['reason']}")
+                                
+                                if collector.get('children'):
+                                    # Prepare collector table data
+                                    child_data = []
+                                    for child in collector['children']:
+                                        child_data.append({
+                                            'Name': child['name'],
+                                            'Reason': child.get('reason', ''),
+                                            'Time (ms)': f"{child['time_ms']:.3f}"
+                                        })
+                                    
+                                    if child_data:
+                                        # Button toggle for collector children (with unique key)
+                                        collector_button_key = f"collector_{index_idx}_{shard_idx}_{collector_idx}_{coll_idx}"
+                                        if collector_button_key not in st.session_state:
+                                            st.session_state[collector_button_key] = False
+                                        
+                                        if st.button(f"📋 {'Hide' if st.session_state[collector_button_key] else 'Show'} Collector Details ({len(child_data)} child collectors)", key=collector_button_key + "_btn"):
+                                            st.session_state[collector_button_key] = not st.session_state[collector_button_key]
+                                        
+                                        if st.session_state[collector_button_key]:
+                                            st.dataframe(child_data, use_container_width=True, hide_index=True)
+                                
+                                st.markdown("---")
+                
+                # Show aggregations if any (with charts and button-toggle tables)
                 if shard['aggregations']:
-                    st.write("**📈 Aggregations:**")
-                    for agg in shard['aggregations']:
-                        st.write(f"• {agg['type']}: {agg['time_ms']:.2f}ms")
-                        if agg['description']:
-                            st.code(agg['description'])
-                        if agg['breakdown']:
-                            breakdown_fig = create_breakdown_chart(
-                                sorted(agg['breakdown'], key=lambda x: x['time_ms'], reverse=True),
-                                f"Aggregation: {agg['type']}"
-                            )
-                            if breakdown_fig:
-                                st.plotly_chart(breakdown_fig, use_container_width=True, config={'displayModeBar': True})
+                    st.write("**Aggregations:**")
+                    for agg_idx, agg in enumerate(shard['aggregations']):
+                        with st.container():
+                            st.write(f"📊 **{agg['type']}** ({agg['time_ms']:.2f}ms)")
+                            if agg['description']:
+                                st.code(agg['description'])
+                            
+                            # Handle breakdown with charts
+                            if agg['breakdown']:
+                                if isinstance(agg['breakdown'], list):
+                                    # Create chart for list format
+                                    breakdown_fig = create_breakdown_chart_from_list(
+                                        agg['breakdown'], 
+                                        f"Aggregation Breakdown: {agg['type']}"
+                                    )
+                                    if breakdown_fig:
+                                        st.plotly_chart(breakdown_fig, use_container_width=True)
+                                    
+                                    # Show breakdown table with button toggle (with unique key)
+                                    breakdown_data = []
+                                    for breakdown_item in agg['breakdown']:
+                                        if isinstance(breakdown_item, dict) and breakdown_item.get('time_ms', 0) > 0:
+                                            breakdown_data.append({
+                                                'Operation': breakdown_item.get('operation', '').replace('_', ' ').title(),
+                                                'Time (ms)': f"{breakdown_item['time_ms']:.3f}"
+                                            })
+                                    
+                                    if breakdown_data:
+                                        breakdown_data.sort(key=lambda x: float(x['Time (ms)']), reverse=True)
+                                        # Button toggle for aggregation breakdown
+                                        agg_button_key = f"agg_list_{index_idx}_{shard_idx}_{agg_idx}"
+                                        if agg_button_key not in st.session_state:
+                                            st.session_state[agg_button_key] = False
+                                        
+                                        if st.button(f"📋 {'Hide' if st.session_state[agg_button_key] else 'Show'} Aggregation Breakdown Table ({len(breakdown_data)} operations)", key=agg_button_key + "_btn"):
+                                            st.session_state[agg_button_key] = not st.session_state[agg_button_key]
+                                        
+                                        if st.session_state[agg_button_key]:
+                                            st.dataframe(breakdown_data, use_container_width=True, hide_index=True)
+                                        
+                                elif isinstance(agg['breakdown'], dict):
+                                    # Create chart for dict format
+                                    breakdown_fig = create_breakdown_chart_from_dict(
+                                        agg['breakdown'], 
+                                        f"Aggregation Breakdown: {agg['type']}"
+                                    )
+                                    if breakdown_fig:
+                                        st.plotly_chart(breakdown_fig, use_container_width=True)
+                                    
+                                    # Show breakdown table with button toggle (with unique key)
+                                    breakdown_data = []
+                                    for key, value in agg['breakdown'].items():
+                                        if not key.endswith('_count') and isinstance(value, (int, float)) and value > 0:
+                                            time_ms = value / 1_000_000 if value > 1000 else value
+                                            breakdown_data.append({
+                                                'Operation': key.replace('_', ' ').title(),
+                                                'Time (ms)': f"{time_ms:.3f}"
+                                            })
+                                    
+                                    if breakdown_data:
+                                        breakdown_data.sort(key=lambda x: float(x['Time (ms)']), reverse=True)
+                                        # Button toggle for aggregation breakdown
+                                        agg_button_key = f"agg_dict_{index_idx}_{shard_idx}_{agg_idx}"
+                                        if agg_button_key not in st.session_state:
+                                            st.session_state[agg_button_key] = False
+                                        
+                                        if st.button(f"📋 {'Hide' if st.session_state[agg_button_key] else 'Show'} Aggregation Breakdown Table ({len(breakdown_data)} operations)", key=agg_button_key + "_btn"):
+                                            st.session_state[agg_button_key] = not st.session_state[agg_button_key]
+                                        
+                                        if st.session_state[agg_button_key]:
+                                            st.dataframe(breakdown_data, use_container_width=True, hide_index=True)
+                            
+                            st.markdown("---")
