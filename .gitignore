@@ -1,0 +1,9 @@
+.venv/
+venv/
+env/
+.env
+__pycache__/
+*.pyc
+.DS_Store
+.streamlit/secrets.toml
+opensearch-profiler.zip
