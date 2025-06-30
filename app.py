@@ -167,7 +167,12 @@ def create_phase_chart(phase_took):
 
 st.title("🔍 OpenSearch Query Profiler")
 
+# Show overall query time if available
+if hasattr(st.session_state, 'result') and 'took' in st.session_state.result:
+    st.metric("Overall Query Time", f"{st.session_state.result['took']}ms")
+
 with st.sidebar:
+    st.image("https://opensearch.org/assets/brand/SVG/Logo/opensearch_logo_default.svg", width=150)
     endpoint = st.text_input("Endpoint", "http://localhost:9200")
     index = st.text_input("Index", "opensearch_dashboards*")
     username = st.text_input("Username", "admin")
