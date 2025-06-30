@@ -54,8 +54,19 @@ def parse_profile(profile_data):
                 collector_data = {
                     "name": collector.get("name", "unknown"),
                     "reason": collector.get("reason", ""),
-                    "time_ms": collector.get("time_in_nanos", 0) / 1_000_000
+                    "time_ms": collector.get("time_in_nanos", 0) / 1_000_000,
+                    "children": []
                 }
+                
+                # Process child collectors
+                for child in collector.get("children", []):
+                    child_data = {
+                        "name": child.get("name", "unknown"),
+                        "reason": child.get("reason", ""),
+                        "time_ms": child.get("time_in_nanos", 0) / 1_000_000
+                    }
+                    collector_data["children"].append(child_data)
+                
                 search_data["collectors"].append(collector_data)
             
             shard_data["searches"].append(search_data)
@@ -233,7 +244,9 @@ with st.sidebar:
                         
                         # Fix triple quotes in description fields
                         def fix_description(match):
-                            content = match.group(1).replace('"', '\\"')
+                            content = match.group(1)
+                            # Escape quotes but preserve the full content
+                            content = content.replace('"', '\\"')
                             return '"description": "' + content + '"'
                         
                         cleaned_response = re.sub(
@@ -325,6 +338,8 @@ if hasattr(st.session_state, 'result'):
                         st.write("**🔍 Queries:**")
                         for query in search['queries']:
                             st.write(f"• {query['type']}: {query['time_ms']:.2f}ms")
+                            if query['description']:
+                                st.code(query['description'])
                             if query['breakdown']:
                                 breakdown_fig = create_breakdown_chart(
                                     sorted(query['breakdown'], key=lambda x: x['time_ms'], reverse=True),
@@ -340,12 +355,25 @@ if hasattr(st.session_state, 'result'):
                             st.write(f"• {collector['name']}: {collector['time_ms']:.2f}ms")
                             if collector['reason']:
                                 st.write(f"  Reason: {collector['reason']}")
+                            
+                            # Show child collectors chart
+                            if collector.get('children'):
+                                child_names = [child['name'] for child in collector['children']]
+                                child_times = [child['time_ms'] for child in collector['children']]
+                                
+                                if child_names:
+                                    fig = go.Figure(go.Bar(y=child_names, x=child_times, orientation='h', 
+                                                          marker_color=child_times, marker_colorscale='Oranges'))
+                                    fig.update_layout(title=f"Collector: {collector['name']}", xaxis_title="Time (ms)", height=200)
+                                    st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': True})
                 
                 # Aggregations
                 if shard['aggregations']:
                     st.write("**📈 Aggregations:**")
                     for agg in shard['aggregations']:
                         st.write(f"• {agg['type']}: {agg['time_ms']:.2f}ms")
+                        if agg['description']:
+                            st.code(agg['description'])
                         if agg['breakdown']:
                             breakdown_fig = create_breakdown_chart(
                                 sorted(agg['breakdown'], key=lambda x: x['time_ms'], reverse=True),
