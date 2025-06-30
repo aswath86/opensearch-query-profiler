@@ -157,7 +157,7 @@ def create_phase_chart(phase_took):
 st.title("🔍 OpenSearch Query Profiler")
 
 with st.sidebar:
-    endpoint = st.text_input("Endpoint", "https://search-test-jsf53bqv7jph3j57yqtcjit3tq.us-east-1.es.amazonaws.com")
+    endpoint = st.text_input("Endpoint", "http://localhost:9200")
     index = st.text_input("Index", "opensearch_dashboards*")
     username = st.text_input("Username", "admin")
     password_input = st.text_input("Password", type="password")
